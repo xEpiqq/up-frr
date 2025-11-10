@@ -13,6 +13,7 @@ export default function Home() {
 	const [contactQuery, setContactQuery] = useState("");
 	const [dropdownOpen, setDropdownOpen] = useState(false);
 	const FIXED_LOCATION_ID = 'Ypfq5TDjEbkz5WdFRLgt';
+	const [pulledZip, setPulledZip] = useState("");
 
 	useEffect(() => {
 		let mounted = true;
@@ -53,6 +54,7 @@ export default function Home() {
 			formData.append('file', file);
 			formData.append('client_contact_id', clientContactId);
 			formData.append('location_id', FIXED_LOCATION_ID);
+			if (pulledZip) formData.append('pulled_zip', pulledZip);
 			const res = await fetch('/api/upload', {
 				method: 'POST',
 				body: formData
@@ -128,6 +130,18 @@ export default function Home() {
 							</div>
 						</div>
 					</div>
+					<label className="flex flex-col gap-2">
+						<span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">ZIP for pulled_zips (optional)</span>
+						<input
+							type="text"
+							inputMode="numeric"
+							pattern="\\d{5}(-\\d{4})?"
+							placeholder="e.g. 90210 or 90210-1234"
+							value={pulledZip}
+							onChange={(e) => setPulledZip(e.target.value)}
+							className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-zinc-900 outline-none focus:ring-2 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
+						/>
+					</label>
 					<label className="flex flex-col gap-2">
 						<span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">CSV File</span>
 						<input

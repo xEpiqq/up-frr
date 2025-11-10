@@ -279,6 +279,7 @@ export async function POST(req: NextRequest) {
 		const file = form.get('file') as File | null;
 		const clientContactId = (form.get('client_contact_id') || '').toString().trim();
 		const locationId = (form.get('location_id') || '').toString().trim();
+		const pulledZipRaw = (form.get('pulled_zip') || '').toString().trim();
 		if (!file) {
 			return NextResponse.json({ error: 'Missing CSV file' }, { status: 400 });
 		}
@@ -298,7 +299,7 @@ export async function POST(req: NextRequest) {
 		// 3) Map to payloads
 		const payloads = cleaned.map(r => toQueueRow(r as any, clientContactId, locationId));
 
-		// 4) Collect zips
+		// 4) Collect zips for duplicate lookup (unchanged behavior)
 		const zips = Array.from(new Set(payloads.map(p => p.address_postal_code).filter((z: string | null) => z && isValidZip(z)) as string[]));
 
 		// 5) Load existing for those zips
@@ -325,10 +326,10 @@ export async function POST(req: NextRequest) {
 		// 7) Insert
 		const { inserted, failed, errors } = await insertBatch(supabase, toInsert);
 
-		// 9) Ensure pulled_zips has entries for these zips for this contact+location
+		// 9) Ensure pulled_zips has entry for user-provided zip (no auto-detect)
 		let pulledZipsCreated = 0;
-		if (zips.length) {
-			const res = await upsertPulledZips(supabase, clientContactId, locationId, zips as string[]);
+		if (pulledZipRaw) {
+			const res = await upsertPulledZips(supabase, clientContactId, locationId, [pulledZipRaw]);
 			pulledZipsCreated = res.created;
 		}
 
