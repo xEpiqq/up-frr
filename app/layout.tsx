@@ -27,6 +27,15 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
+        <header className="w-full border-b border-zinc-200 bg-white py-3 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="mx-auto flex max-w-5xl items-center justify-between px-4">
+            <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Uploader</div>
+            <nav className="flex gap-4 text-sm">
+              <a href="/" className="text-zinc-700 hover:underline dark:text-zinc-300">Upload</a>
+              <a href="/pulled-zips" className="text-zinc-700 hover:underline dark:text-zinc-300">Add to Pulled Zips</a>
+            </nav>
+          </div>
+        </header>
         {children}
       </body>
     </html>
