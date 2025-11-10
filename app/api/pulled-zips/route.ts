@@ -12,10 +12,6 @@ function getSupabase() {
   });
 }
 
-function isValidZip(zip: string) {
-  return /^\d{5}(-\d{4})?$/.test(zip);
-}
-
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
@@ -27,9 +23,6 @@ export async function POST(req: NextRequest) {
     }
     if (!zip) {
       return NextResponse.json({ error: 'Missing zip' }, { status: 400 });
-    }
-    if (!isValidZip(zip)) {
-      return NextResponse.json({ error: 'Invalid zip format' }, { status: 400 });
     }
     const supabase = getSupabase();
     const { data: existing, error: selErr } = await supabase
