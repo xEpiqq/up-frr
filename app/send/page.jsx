@@ -95,7 +95,7 @@ export default function SendPage() {
     }
   }
 
-  // Client-driven chunked upload loop (25 per call)
+  // Client-driven chunked upload loop (10 per call)
   async function runUpload() {
     setError(null);
     setRunning(true);
@@ -106,14 +106,14 @@ export default function SendPage() {
 
     try {
       const wanted = Math.max(1, Math.min(500, parseInt((amount || '0').trim(), 10) || 0));
-      const batchSize = 25; // ← per your request
+      const batchSize = 10; // process 10 per call
       let remaining = wanted;
 
       while (remaining > 0) {
         if (cancelRef.current) break;
 
         const thisBatch = Math.min(batchSize, remaining);
-        const res = await fetch('/api/send', {
+	        const res = await fetch('/api/upload-contacts', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({

@@ -33,6 +33,7 @@ export default function RootLayout({
             <nav className="flex gap-4 text-sm">
               <a href="/" className="text-zinc-700 hover:underline dark:text-zinc-300">Upload</a>
               <a href="/pulled-zips" className="text-zinc-700 hover:underline dark:text-zinc-300">Add to Pulled Zips</a>
+              <a href="/send" className="text-zinc-700 hover:underline dark:text-zinc-300">Send</a>
             </nav>
           </div>
         </header>

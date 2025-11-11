@@ -30,7 +30,7 @@ const GHL_CONTACTS_URL = `${GHL_BASE}/contacts/`;
 const GHL_VERSION = '2021-07-28';
 const GHL_PIT = 'pit-f45cb018-0c57-4b4b-90f5-1d14217fe873'; // private integration token
 const RATE_LIMIT_RPS = 9;
-const CALL_CAP = 25; // hard max per HTTP call
+const CALL_CAP = 10; // hard max per HTTP call
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Small helpers
@@ -108,6 +108,21 @@ async function postWithRetry(payload, deadlineMs, maxRetries = 3, baseDelayMs = 
     if (remaining <= 0) return { ok: false, status: 499, text: 'deadline_exceeded' };
     await sleep(Math.min(delay, remaining));
   }
+}
+
+// Build a detailed error payload for client-side visibility
+function buildErrorPayload(message, e, extra = {}) {
+  const out = { error: message };
+  if (e && typeof e === 'object') {
+    if (e.name) out.name = e.name;
+    if (e.code) out.code = e.code;
+    if (e.details) out.details = e.details;
+    if (e.hint) out.hint = e.hint;
+    if (e.step) out.step = e.step;
+    if (e.context) out.context = e.context;
+  }
+  if (extra && Object.keys(extra).length) out.meta = extra;
+  return out;
 }
 
 // Build GHL payload from queue row
@@ -200,7 +215,16 @@ async function fetchPendingByZip(supabase, zip, limit) {
     .order('created_at', { ascending: true })
     .limit(limit);
 
-  if (error) throw new Error(error.message);
+  if (error) {
+    const err = new Error(error.message);
+    err.name = 'SupabaseQueryError';
+    err.code = error.code;
+    err.details = error.details;
+    err.hint = error.hint;
+    err.step = 'fetchPendingByZip';
+    err.context = { zip, limit };
+    throw err;
+  }
   return data || [];
 }
 
@@ -231,8 +255,8 @@ async function runChunk({ zip, amount, tag, windowSeconds = 55, concurrency = RA
   const errors = [];
   const seen = new Set();
 
-  // Pull a bit extra for dedupe slack
-  const pull = Math.min(limit * 2, 200);
+  // Pull only what's needed to minimize DB load
+  const pull = limit;
   const batch = await fetchPendingByZip(supabase, zip, pull);
 
   const toProcess = [];
@@ -252,20 +276,26 @@ async function runChunk({ zip, amount, tag, windowSeconds = 55, concurrency = RA
     const slice = toProcess.slice(i, i + concurrency);
     await Promise.all(
       slice.map(async (row) => {
-        attempted++;
-        if (!row.location_id) {
-          await markRowError(supabase, row.id, 'Missing location_id');
-          errors.push({ id: row.id, status: 422, text: 'Missing location_id' });
-          return;
-        }
-        const payload = toGhlPayload(row, tag);
-        const res = await postWithRetry(payload, deadline, 3, 500);
-        if (res.ok) {
-          await markRowSuccess(supabase, row.id);
-          succeeded++;
-        } else {
-          await markRowError(supabase, row.id, `GHL ${res.status}: ${res.text}`);
-          errors.push({ id: row.id, status: res.status, text: res.text || '' });
+        try {
+          attempted++;
+          if (!row.location_id) {
+            await markRowError(supabase, row.id, 'Missing location_id');
+            errors.push({ id: row.id, status: 422, text: 'Missing location_id' });
+            return;
+          }
+          const payload = toGhlPayload(row, tag);
+          const res = await postWithRetry(payload, deadline, 3, 500);
+          if (res.ok) {
+            await markRowSuccess(supabase, row.id);
+            succeeded++;
+          } else {
+            await markRowError(supabase, row.id, `GHL ${res.status}: ${res.text}`);
+            errors.push({ id: row.id, status: res.status, text: res.text || '' });
+          }
+        } catch (e) {
+          // Do not crash entire chunk on per-row failures; record and continue
+          const text = (e && e.message) ? e.message : 'row_processing_error';
+          errors.push({ id: row.id, status: 500, text });
         }
       })
     );
@@ -303,6 +333,7 @@ export async function POST(req) {
     const out = await runChunk({ zip, amount: requestedAmount, tag, windowSeconds: 55, concurrency: RATE_LIMIT_RPS });
     return json(out);
   } catch (e) {
-    return json({ error: e?.message || 'Server error' }, 500);
+    const payload = buildErrorPayload(e?.message || 'Server error', e, { handler: 'upload-contacts POST' });
+    return json(payload, 500);
   }
 }
