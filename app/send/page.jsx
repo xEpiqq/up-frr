@@ -38,6 +38,7 @@ export default function SendPage() {
   });
   const [lastChunk, setLastChunk] = useState(null);
   const [error, setError] = useState(null);
+  const [errorLogs, setErrorLogs] = useState([]);
 
   // Load pulled ZIPs & tags
   const loadZips = useCallback(async () => {
@@ -103,6 +104,7 @@ export default function SendPage() {
     cancelRef.current = false;
     setProgress({ attempted: 0, succeeded: 0, failed: 0, dedupeSkipped: 0 });
     setLastChunk(null);
+    setErrorLogs([]);
 
     try {
       const wanted = Math.max(1, Math.min(500, parseInt((amount || '0').trim(), 10) || 0));
@@ -133,8 +135,20 @@ export default function SendPage() {
           dedupeSkipped: prev.dedupeSkipped + (json.dedupeSkipped ?? 0)
         }));
         setLastChunk(json);
+        if (Array.isArray(json.errors) && json.errors.length > 0) {
+          const now = Date.now();
+          setErrorLogs((prev) => [
+            ...prev,
+            ...json.errors.map((e) => ({
+              id: e?.id ?? null,
+              status: e?.status ?? null,
+              text: e?.text ?? '',
+              t: now
+            }))
+          ]);
+        }
 
-        remaining -= thisBatch;
+        remaining -= Math.max(0, json.succeeded ?? 0);
 
         // brief yield to UI
         await new Promise((r) => setTimeout(r, 250));
@@ -338,6 +352,24 @@ export default function SendPage() {
           {cancelled && (
             <div className="mt-2 text-xs text-amber-600 dark:text-amber-400">
               Cancel requested — finishing current batch…
+            </div>
+          )}
+        </div>
+
+        {/* Error console */}
+        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-100">
+          <div className="mb-2 font-semibold">Error log ({errorLogs.length})</div>
+          {errorLogs.length === 0 ? (
+            <div className="text-xs opacity-75">No errors yet.</div>
+          ) : (
+            <div className="max-h-56 overflow-auto rounded bg-white/50 p-2 text-xs dark:bg-black/40">
+              <ul className="space-y-1">
+                {errorLogs.map((e, idx) => (
+                  <li key={`${e.id ?? 'row'}-${idx}`} className="whitespace-pre-wrap">
+                    [{new Date(e.t).toLocaleTimeString()}] Row {e.id ?? 'unknown'} — {e.status ?? 'ERR'}: {e.text || 'Unknown error'}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </div>

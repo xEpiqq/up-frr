@@ -266,6 +266,8 @@ async function fetchPendingByZip(supabase, zip, limit, offset = 0) {
       ].join(',')
     )
     .or(orExpr)
+    // Only pull rows that have never been processed in prior runs
+    .is('processed_at', null)
     .order('created_at', { ascending: true })
     .range(offset, Math.max(offset, offset + limit - 1));
 
@@ -393,6 +395,7 @@ async function runChunk({ zip, amount, tag, windowSeconds = 55, concurrency = RA
     succeeded,
     failed: attempted - succeeded,
     dedupeSkipped,
+    errors,
     errorsSample: errors.slice(0, 10),
     errorsByStatus,
     rate_limit_backoff_ms: Math.max(rateLimitWaitMs, getRemainingBackoffMs()),
