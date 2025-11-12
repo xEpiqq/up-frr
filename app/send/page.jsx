@@ -106,7 +106,7 @@ export default function SendPage() {
 
     try {
       const wanted = Math.max(1, Math.min(500, parseInt((amount || '0').trim(), 10) || 0));
-      const batchSize = 10; // process 10 per call
+      const batchSize = 5; // process 5 per call
       let remaining = wanted;
 
       while (remaining > 0) {
@@ -137,7 +137,7 @@ export default function SendPage() {
         remaining -= thisBatch;
 
         // brief yield to UI
-        await new Promise((r) => setTimeout(r, 120));
+        await new Promise((r) => setTimeout(r, 250));
       }
     } catch (e) {
       setError(e?.message || String(e));
@@ -328,6 +328,11 @@ export default function SendPage() {
           {lastChunk?.duration_ms != null && (
             <div className="mt-2 text-xs opacity-75">
               Last chunk duration: {(lastChunk.duration_ms / 1000).toFixed(2)}s · Rate limit: {lastChunk.rate_limit_rps}/s · Per-call cap: {lastChunk.call_cap}
+            </div>
+          )}
+          {lastChunk?.rate_limit_backoff_ms > 0 && (
+            <div className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+              Rate limited — waiting approximately {(lastChunk.rate_limit_backoff_ms / 1000).toFixed(1)}s before next requests.
             </div>
           )}
           {cancelled && (

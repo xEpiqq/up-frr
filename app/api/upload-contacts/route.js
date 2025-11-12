@@ -29,8 +29,8 @@ const GHL_BASE = 'https://services.leadconnectorhq.com';
 const GHL_CONTACTS_URL = `${GHL_BASE}/contacts/`;
 const GHL_VERSION = '2021-07-28';
 const GHL_PIT = 'pit-f45cb018-0c57-4b4b-90f5-1d14217fe873'; // private integration token
-const RATE_LIMIT_RPS = 9;
-const CALL_CAP = 10; // hard max per HTTP call
+const RATE_LIMIT_RPS = 5;
+const CALL_CAP = 5; // hard max per HTTP call
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Small helpers
@@ -58,6 +58,26 @@ function ghlHeaders() {
   };
 }
 
+// Track a global (per-process) backoff until timestamp when 429 is received
+let globalBackoffUntil = 0;
+function getRemainingBackoffMs() {
+  return Math.max(0, globalBackoffUntil - Date.now());
+}
+function parseRetryAfterMs(headerValue) {
+  if (!headerValue) return 0;
+  const s = String(headerValue).trim();
+  // Numeric seconds
+  const asNum = Number(s);
+  if (Number.isFinite(asNum) && asNum >= 0) return Math.floor(asNum * 1000);
+  // HTTP date
+  const asDate = Date.parse(s);
+  if (!Number.isNaN(asDate)) {
+    const ms = asDate - Date.now();
+    return ms > 0 ? ms : 0;
+  }
+  return 0;
+}
+
 // Sliding-window limiter: ≤RATE_LIMIT_RPS per 1000ms window
 class RateLimiter {
   constructor(rps) {
@@ -68,6 +88,13 @@ class RateLimiter {
     for (;;) {
       const now = Date.now();
       if (deadlineMs && now >= deadlineMs) return false;
+      // Respect global backoff first
+      const remain = getRemainingBackoffMs();
+      if (remain > 0) {
+        const slice = deadlineMs ? Math.min(remain, Math.max(0, deadlineMs - now)) : remain;
+        if (slice > 0) await sleep(slice);
+        continue;
+      }
       const cutoff = now - 1000;
       while (this.stamps.length && this.stamps[0] <= cutoff) this.stamps.shift();
       if (this.stamps.length < this.rps) {
@@ -92,15 +119,34 @@ async function postGhl(payload, deadlineMs) {
     body: JSON.stringify(payload)
   });
   const text = await res.text().catch(() => '');
-  return { ok: res.ok, status: res.status, text };
+  const retryAfterHeader = res.headers?.get?.('retry-after');
+  const retryAfterMs = parseRetryAfterMs(retryAfterHeader);
+  return { ok: res.ok, status: res.status, text, retryAfterMs };
 }
 async function postWithRetry(payload, deadlineMs, maxRetries = 3, baseDelayMs = 500) {
   let attempt = 0;
+  let totalRateLimitWaitMs = 0;
   for (;;) {
     if (deadlineMs && Date.now() >= deadlineMs) return { ok: false, status: 499, text: 'deadline_exceeded' };
     const r = await postGhl(payload, deadlineMs);
     if (r.ok) return r;
     if (!(r.status === 429 || (r.status >= 500 && r.status <= 599))) return r;
+    // If 429: respect Retry-After header dynamically (plus small buffer)
+    if (r.status === 429) {
+      const waitMs = Math.min(
+        120000,
+        Math.max(0, Math.floor((r.retryAfterMs || 0) * 1.1) || 0) // 10% under target to stay slightly below
+      );
+      if (waitMs > 0) {
+        globalBackoffUntil = Date.now() + waitMs;
+        totalRateLimitWaitMs += waitMs;
+        const remaining = deadlineMs ? Math.max(0, deadlineMs - Date.now()) : waitMs;
+        if (remaining <= 0) return { ok: false, status: 499, text: 'deadline_exceeded' };
+        await sleep(Math.min(waitMs, remaining));
+        // Do not count this as a normal backoff attempt; continue and try again
+        continue;
+      }
+    }
     attempt++;
     if (attempt >= maxRetries) return r;
     const delay = baseDelayMs * Math.pow(2, attempt - 1);
@@ -184,8 +230,17 @@ async function markRowError(supabase, id, message) {
   if (error) throw new Error(error.message);
 }
 
-// Fetch up to `limit` pending rows for ZIP
-async function fetchPendingByZip(supabase, zip, limit) {
+// Fetch up to `limit` pending rows for ZIP, with paging via offset
+async function fetchPendingByZip(supabase, zip, limit, offset = 0) {
+  const zipped = String(zip).trim();
+  // Combine uploaded=false/null with either address_postal_code or zip equal to provided
+  // Using nested OR to avoid accidental inclusion of uploaded=true
+  const orExpr = [
+    `and(uploaded.is.null,address_postal_code.eq.${zipped})`,
+    `and(uploaded.eq.false,address_postal_code.eq.${zipped})`,
+    `and(uploaded.is.null,zip.eq.${zipped})`,
+    `and(uploaded.eq.false,zip.eq.${zipped})`
+  ].join(',');
   const { data, error } = await supabase
     .from('contact_queue')
     .select(
@@ -210,10 +265,9 @@ async function fetchPendingByZip(supabase, zip, limit) {
         'created_at'
       ].join(',')
     )
-    .or('uploaded.eq.false,uploaded.is.null')
-    .or(`address_postal_code.eq.${zip},zip.eq.${zip}`)
+    .or(orExpr)
     .order('created_at', { ascending: true })
-    .limit(limit);
+    .range(offset, Math.max(offset, offset + limit - 1));
 
   if (error) {
     const err = new Error(error.message);
@@ -253,22 +307,31 @@ async function runChunk({ zip, amount, tag, windowSeconds = 55, concurrency = RA
   let succeeded = 0;
   let dedupeSkipped = 0;
   const errors = [];
+  const errorsByStatus = {};
+  let rateLimitWaitMs = 0;
   const seen = new Set();
 
-  // Pull only what's needed to minimize DB load
-  const pull = limit;
-  const batch = await fetchPendingByZip(supabase, zip, pull);
-
+  // Pull rows, topping up until we have `limit` unique items or run out/time out
   const toProcess = [];
-  for (const row of batch) {
-    const k = dedupeKey(row);
-    if (seen.has(k)) {
-      dedupeSkipped++;
-      continue;
+  let offset = 0;
+  const pageSize = Math.max(5, limit); // fetch in at least 5s
+  while (toProcess.length < limit) {
+    if (Date.now() >= deadline) break;
+    const batch = await fetchPendingByZip(supabase, zip, pageSize, offset);
+    if (!batch.length) break;
+    offset += batch.length;
+    for (const row of batch) {
+      const k = dedupeKey(row);
+      if (seen.has(k)) {
+        dedupeSkipped++;
+        continue;
+      }
+      seen.add(k);
+      toProcess.push(row);
+      if (toProcess.length >= limit) break;
     }
-    seen.add(k);
-    toProcess.push(row);
-    if (toProcess.length >= limit) break;
+    // If batch was small, likely no more rows
+    if (batch.length < pageSize) break;
   }
 
   for (let i = 0; i < toProcess.length; i += concurrency) {
@@ -281,6 +344,7 @@ async function runChunk({ zip, amount, tag, windowSeconds = 55, concurrency = RA
           if (!row.location_id) {
             await markRowError(supabase, row.id, 'Missing location_id');
             errors.push({ id: row.id, status: 422, text: 'Missing location_id' });
+            errorsByStatus['422'] = (errorsByStatus['422'] || 0) + 1;
             return;
           }
           const payload = toGhlPayload(row, tag);
@@ -289,18 +353,38 @@ async function runChunk({ zip, amount, tag, windowSeconds = 55, concurrency = RA
             await markRowSuccess(supabase, row.id);
             succeeded++;
           } else {
-            await markRowError(supabase, row.id, `GHL ${res.status}: ${res.text}`);
-            errors.push({ id: row.id, status: res.status, text: res.text || '' });
+            // Try to parse error body for more detail
+            let reason = '';
+            try {
+              const parsed = JSON.parse(res.text || '{}');
+              reason = parsed?.message || parsed?.error || parsed?.details || '';
+            } catch {
+              reason = '';
+            }
+            const message = `GHL ${res.status}: ${reason || (res.text || '').slice(0, 500)}`;
+            await markRowError(supabase, row.id, message);
+            errors.push({ id: row.id, status: res.status, text: message });
+            errorsByStatus[String(res.status)] = (errorsByStatus[String(res.status)] || 0) + 1;
+            // Track rate-limit waits if provided in failed response too
+            if (res.status === 429 && res.retryAfterMs) {
+              rateLimitWaitMs = Math.max(rateLimitWaitMs, Math.floor(res.retryAfterMs * 1.1));
+            }
           }
         } catch (e) {
           // Do not crash entire chunk on per-row failures; record and continue
           const text = (e && e.message) ? e.message : 'row_processing_error';
+          try {
+            await markRowError(supabase, row.id, text);
+          } catch (_) {
+            // swallow secondary failure
+          }
           errors.push({ id: row.id, status: 500, text });
+          errorsByStatus['500'] = (errorsByStatus['500'] || 0) + 1;
         }
       })
     );
     if (Date.now() >= deadline || attempted >= limit) break;
-    await sleep(5);
+    await sleep(25);
   }
 
   return {
@@ -310,6 +394,8 @@ async function runChunk({ zip, amount, tag, windowSeconds = 55, concurrency = RA
     failed: attempted - succeeded,
     dedupeSkipped,
     errorsSample: errors.slice(0, 10),
+    errorsByStatus,
+    rate_limit_backoff_ms: Math.max(rateLimitWaitMs, getRemainingBackoffMs()),
     duration_ms: Date.now() - started,
     rate_limit_rps: RATE_LIMIT_RPS,
     call_cap: CALL_CAP,
@@ -329,7 +415,7 @@ export async function POST(req) {
 
     if (!zip) return json({ error: 'Missing required parameter: zip' }, 400);
 
-    // Per-call cap enforced inside runChunk (≤ 25)
+    // Per-call cap enforced inside runChunk (≤ CALL_CAP)
     const out = await runChunk({ zip, amount: requestedAmount, tag, windowSeconds: 55, concurrency: RATE_LIMIT_RPS });
     return json(out);
   } catch (e) {
