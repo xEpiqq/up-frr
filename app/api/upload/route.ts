@@ -104,7 +104,8 @@ function cleanRows(rawRows: Record<string, unknown>[]) {
 function toQueueRow(
 	cleaned: Record<string, any>,
 	clientContactId: string,
-	locationId: string
+	locationId: string,
+	userZipOverride?: string | null
 ) {
 	const firstName: string = cleaned.firstName ?? '';
 	const lastName: string = cleaned.lastName ?? '';
@@ -113,6 +114,8 @@ function toQueueRow(
 	const parsed = parsePropertyAddress(addressFull);
 	const postalCode = parsed.zip && isValidZip(parsed.zip) ? parsed.zip : null;
 	const e164 = toE164US(cleaned.wireless_choice);
+	const zipReal = postalCode;
+	const zipFinal = (userZipOverride && isValidZip(userZipOverride)) ? userZipOverride : postalCode;
 
 	const email1 = cleaned.email1 ?? null;
 	const email2 = cleaned.email2 ?? null;
@@ -127,7 +130,8 @@ function toQueueRow(
 	return {
 		client_contact_id: clientContactId,
 		location_id: locationId,
-		zip: postalCode ?? null,
+		zip: zipFinal ?? null,
+		zip_real: zipReal ?? null,
 		first_name: firstName || null,
 		last_name: lastName || null,
 		full_name: fullName,
@@ -259,7 +263,17 @@ async function insertBatch(
 	const errors: { batchStart: number; message: string }[] = [];
 	for (let i = 0; i < rows.length; i += INSERT_BATCH_SIZE) {
 		const slice = rows.slice(i, i + INSERT_BATCH_SIZE);
-		const { error, count } = await supabase.from(TABLE_NAME).insert(slice, { count: 'exact' });
+		let { error, count } = await supabase.from(TABLE_NAME).insert(slice, { count: 'exact' });
+		// Fallback: if zip_real column does not exist yet, retry without it to avoid breaking uploads
+		if (error && /column\s+"?zip_real"?\s+does not exist/i.test(error.message)) {
+			const downgraded = slice.map(r => {
+				const { zip_real, ...rest } = r;
+				return rest;
+			});
+			const retry = await supabase.from(TABLE_NAME).insert(downgraded, { count: 'exact' });
+			error = retry.error || null;
+			count = retry.count as any;
+		}
 		if (error) {
 			errors.push({ batchStart: i, message: error.message });
 		} else {
@@ -279,6 +293,7 @@ export async function POST(req: NextRequest) {
 		const file = form.get('file') as File | null;
 		const clientContactId = (form.get('client_contact_id') || '').toString().trim();
 		const locationId = (form.get('location_id') || '').toString().trim();
+		const setZipRaw = (form.get('set_zip') || '').toString().trim();
 		const pulledZipRaw = (form.get('pulled_zip') || '').toString().trim();
 		if (!file) {
 			return NextResponse.json({ error: 'Missing CSV file' }, { status: 400 });
@@ -286,6 +301,7 @@ export async function POST(req: NextRequest) {
 		if (!clientContactId || !locationId) {
 			return NextResponse.json({ error: 'Both client_contact_id and location_id are required' }, { status: 400 });
 		}
+		const setZip = setZipRaw && isValidZip(setZipRaw) ? setZipRaw : null;
 
 		// 1) Read CSV
 		const buf = Buffer.from(await file.arrayBuffer());
@@ -297,7 +313,7 @@ export async function POST(req: NextRequest) {
 		const cleaned = cleanRows(rawRows);
 
 		// 3) Map to payloads
-		const payloads = cleaned.map(r => toQueueRow(r as any, clientContactId, locationId));
+		const payloads = cleaned.map(r => toQueueRow(r as any, clientContactId, locationId, setZip));
 
 		// 4) Collect zips for duplicate lookup (unchanged behavior)
 		const zips = Array.from(new Set(payloads.map(p => p.address_postal_code).filter((z: string | null) => z && isValidZip(z)) as string[]));

@@ -336,6 +336,29 @@ async function runChunk({ zip, amount, tag, windowSeconds = 55, concurrency = RA
     if (batch.length < pageSize) break;
   }
 
+  // If nothing to process, report a 'no rows found' informational error for UI
+  if (toProcess.length === 0) {
+    const msg = `No pending rows found for ZIP ${zip}`;
+    const infoErr = { id: null, status: 404, text: msg };
+    errors.push(infoErr);
+    errorsByStatus['404'] = (errorsByStatus['404'] || 0) + 1;
+    return {
+      zip,
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+      dedupeSkipped,
+      errors,
+      errorsSample: errors.slice(0, 10),
+      errorsByStatus,
+      rate_limit_backoff_ms: getRemainingBackoffMs(),
+      no_rows_found: true,
+      duration_ms: Date.now() - started,
+      rate_limit_rps: RATE_LIMIT_RPS,
+      call_cap: CALL_CAP,
+    };
+  }
+
   for (let i = 0; i < toProcess.length; i += concurrency) {
     if (Date.now() >= deadline) break;
     const slice = toProcess.slice(i, i + concurrency);

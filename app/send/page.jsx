@@ -13,6 +13,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 export default function SendPage() {
   const [zips, setZips] = useState([]);
+  const [pulledZipRows, setPulledZipRows] = useState([]);
   const [zipQuery, setZipQuery] = useState('');
   const [zipOpen, setZipOpen] = useState(false);
   const [selectedZip, setSelectedZip] = useState('');
@@ -39,18 +40,27 @@ export default function SendPage() {
   const [lastChunk, setLastChunk] = useState(null);
   const [error, setError] = useState(null);
   const [errorLogs, setErrorLogs] = useState([]);
+  const [contactLabels, setContactLabels] = useState({});
 
   // Load pulled ZIPs & tags
   const loadZips = useCallback(async () => {
     const { data, error } = await supabase
       .from('pulled_zips')
-      .select('zip')
+      .select('zip,client_contact_id')
       .order('created_at', { ascending: false })
       .limit(1000);
     if (error) throw error;
-    const unique = Array.from(new Set((data || []).map((r) => String(r.zip || '').trim()).filter(Boolean)));
-    unique.sort();
-    setZips(unique);
+    const rows = (data || [])
+      .map((r) => ({
+        zip: String(r.zip || '').trim(),
+        client_contact_id: String(r.client_contact_id || '').trim()
+      }))
+      .filter((r) => r.zip);
+    setPulledZipRows(rows);
+    // Keep a plain zip list for legacy behaviors if needed
+    const onlyZips = Array.from(new Set(rows.map((r) => r.zip)));
+    onlyZips.sort();
+    setZips(onlyZips);
   }, []);
 
   const loadTags = useCallback(async () => {
@@ -58,15 +68,51 @@ export default function SendPage() {
     setTags((data || []).map((r) => String(r.tag || '')).filter(Boolean));
   }, []);
 
+  // Load contact labels via server API (service role)
+  const loadContactLabels = useCallback(async () => {
+    try {
+      const res = await fetch('/api/contacts', { method: 'GET' });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || 'Failed to load contacts');
+      const map = {};
+      for (const c of json.contacts || []) {
+        if (c?.id) map[String(c.id)] = String(c.label || '');
+      }
+      setContactLabels(map);
+    } catch (e) {
+      // Non-fatal; labels will just be missing
+    }
+  }, []);
+
   useEffect(() => {
     loadZips().catch((e) => setError(e?.message || String(e)));
     loadTags().catch(() => {});
-  }, [loadZips, loadTags]);
+    loadContactLabels().catch(() => {});
+  }, [loadZips, loadTags, loadContactLabels]);
 
+  // Build display list with "ZIP (Contact Name)"
   const filteredZips = useMemo(() => {
-    if (!zipQuery.trim()) return zips.slice(0, 300);
-    return zips.filter((z) => z.toLowerCase().includes(zipQuery.toLowerCase())).slice(0, 300);
-  }, [zips, zipQuery]);
+    const query = zipQuery.trim().toLowerCase();
+    const items = pulledZipRows.map((r) => {
+      const name = contactLabels[r.client_contact_id] || 'Unknown';
+      return {
+        key: `${r.zip}|${r.client_contact_id}`,
+        zip: r.zip,
+        contactId: r.client_contact_id,
+        label: `${r.zip} (${name})`,
+        search: `${r.zip} ${name}`.toLowerCase()
+      };
+    });
+    const uniq = new Map();
+    for (const it of items) {
+      uniq.set(it.key, it);
+    }
+    const all = Array.from(uniq.values());
+    const filtered = query ? all.filter((it) => it.search.includes(query)) : all;
+    // Sort by ZIP then name
+    filtered.sort((a, b) => (a.zip === b.zip ? a.label.localeCompare(b.label) : a.zip.localeCompare(b.zip)));
+    return filtered.slice(0, 300);
+  }, [pulledZipRows, contactLabels, zipQuery]);
 
   const filteredTags = useMemo(() => {
     if (!tagQuery.trim()) return tags.slice(0, 300);
@@ -148,6 +194,11 @@ export default function SendPage() {
           ]);
         }
 
+        // If server indicates no rows for this ZIP, stop the loop
+        if (json.no_rows_found) {
+          break;
+        }
+
         remaining -= Math.max(0, json.succeeded ?? 0);
 
         // brief yield to UI
@@ -191,20 +242,20 @@ export default function SendPage() {
                 className="absolute bottom-full left-0 right-0 mb-2 max-h-60 overflow-auto rounded-md border border-zinc-300 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800 z-10"
                 onMouseLeave={() => setZipOpen(false)}
               >
-                {filteredZips.map((z) => (
+                {filteredZips.map((it) => (
                   <button
                     type="button"
-                    key={z}
+                    key={it.key}
                     onClick={() => {
-                      setSelectedZip(z);
+                      setSelectedZip(it.zip);
                       setZipQuery('');
                       setZipOpen(false);
                     }}
                     className={`block w-full cursor-pointer px-3 py-2 text-left hover:bg-zinc-100 dark:hover:bg-zinc-700 ${
-                      selectedZip === z ? 'bg-zinc-100 dark:bg-zinc-700' : ''
+                      selectedZip === it.zip ? 'bg-zinc-100 dark:bg-zinc-700' : ''
                     }`}
                   >
-                    {z}
+                    {it.label}
                   </button>
                 ))}
                 {filteredZips.length === 0 && (

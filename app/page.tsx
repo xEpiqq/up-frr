@@ -12,6 +12,7 @@ export default function Home() {
 	const [loadingContacts, setLoadingContacts] = useState(false);
 	const [contactQuery, setContactQuery] = useState("");
 	const [dropdownOpen, setDropdownOpen] = useState(false);
+	const [setZip, setSetZip] = useState("");
 	const FIXED_LOCATION_ID = 'Ypfq5TDjEbkz5WdFRLgt';
 
 	useEffect(() => {
@@ -53,6 +54,9 @@ export default function Home() {
 			formData.append('file', file);
 			formData.append('client_contact_id', clientContactId);
 			formData.append('location_id', FIXED_LOCATION_ID);
+			if (setZip.trim()) {
+				formData.append('set_zip', setZip.trim());
+			}
 			const res = await fetch('/api/upload', {
 				method: 'POST',
 				body: formData
@@ -128,6 +132,19 @@ export default function Home() {
 							</div>
 						</div>
 					</div>
+					<label className="flex flex-col gap-2">
+						<span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">ZIP override for inserted rows (optional)</span>
+						<input
+							type="text"
+							placeholder="e.g. 90210"
+							value={setZip}
+							onChange={(e) => setSetZip(e.target.value)}
+							className="w-48 rounded-md border border-zinc-300 bg-white px-3 py-2 text-zinc-900 outline-none focus:ring-2 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
+						/>
+						<div className="text-xs text-zinc-500 dark:text-zinc-400">
+							If provided, the `zip` column will be set to this value for all inserted contacts. The auto-detected ZIP from the address is stored in `zip_real`.
+						</div>
+					</label>
 					<label className="flex flex-col gap-2">
 						<span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">CSV File</span>
 						<input
